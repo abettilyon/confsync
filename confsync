@@ -1,0 +1,368 @@
+#!/usr/bin/perl
+#
+#
+# Written by Allen Bettilyon, allen@bettilyon.net 
+#
+# Copyright Allen Bettilyon 
+#
+# Confsync is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# Confsync is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# For a copy of the GNU General Public License, see http://www.gnu.org/licenses
+# or, write to the Free Software Foundation, Inc. 
+#
+#   59 Temple Place 
+#   Suite 330 
+#   Boston, MA 02111-1307  USA 
+#
+# Feel free to contact me with Any questions, comments, suggestions 
+# or concernces regarding confsync.  
+#
+#################################################
+
+##
+## Version 1.0
+## 
+
+
+use Getopt::Std;
+use File::Copy;
+use File::Path;
+use POSIX;
+
+##
+## Location of the master confsync repository.  
+##
+$conf_dir = "/mnt/confsync";
+
+##
+## Location of file the repository.  Backup files are stored here.
+##
+$repository_base = "/var/confsync_repository";
+
+##
+## Suffixes that define pre and post commands inside the
+## master repository
+##
+$command_suffix = "..cmd";  
+$command_suffix_regex = "\.\.cmd\$"; 
+$precommand_suffix = "..pre";
+$precommand_suffix_regex = "\.\.pre\$";
+
+
+##
+## Runtime variables used 
+##
+$host_class = undef;
+$hostname = `hostname -s`; 
+chomp($hostname);
+$verbose = undef;
+$swap_global = undef;
+$dry_run = undef;
+
+&process_command_line;
+
+if( $repository_base ){
+   $repository = $repository_base . "/"  . POSIX::strftime( "%Y%m%d", localtime(time) ); 
+}
+
+######################################
+
+##
+## data structure to hold config file info 
+##
+##   $config_file{ FILE_NAME } = {
+##               src   => SOURCE
+##               mtime => SOURCE_FILES_MTIME
+##   }
+##
+
+my %config_files = ();  
+
+
+
+
+##
+## The common files
+##
+push @path_list, "$conf_dir/common";
+
+##
+## The host class files (IF we've got a host_class)
+## 
+if( length( $host_class ) ){
+   push @path_list, "$conf_dir/$host_class";
+   push @path_list, "$conf_dir/$host_class.$hostname";
+}
+else {
+   print "WARNING: no host_class specified... Bailing out!\n";
+   exit;
+}
+
+
+
+##
+## get all the files in the @path_list array
+##
+foreach my $path ( @path_list ) {
+	$swap_global = $path;  # global var to deterimne real file location
+	&get_files( $path );
+}
+
+
+foreach $file ( keys %config_files ){
+   &copy_file( $file ) if &should_copy( $file );  
+}
+
+
+exit;
+
+#################################################
+#################################################
+################################################# 
+
+
+sub should_copy {
+   ## logic to determine if we SHOULLD copy the file
+   ## return true if we should copy
+   ## return flase if we should NOT
+   #########################################
+   my $file = shift;
+
+   ## stat both files
+   @dst_stat = stat( $file );
+   @src_stat = stat( $config_files{$file}{src} ); 
+
+   ## remeber the file permissions (mask out filetype)
+   #$config_files{$file}{mode} = sprintf("$file %04o", $src_stat[2] & 07777);
+   $config_files{$file}{mode} = $src_stat[2] & 07777;
+   #$config_files{$file}{dst_mode} = sprintf("$file %04o", $dst_stat[2] & 07777);
+   $config_files{$file}{dst_mode} = $dst_stat[2] & 07777;
+
+   ## file doesn't exist
+   return 1 unless -f $file;  
+ 
+   ## Check size
+   if( $dst_stat[7] != $src_stat[7] ){ return 1; } 
+   
+   ## Check mtime
+   if( $dst_stat[9] != $src_stat[9] ){
+      # store this to prevent another stat later on
+      $config_files{$file}{mtime} = $src_stat[9]; 
+      return 1;
+   }
+
+   ## Check permissions
+   if( $config_files{$file}{mode} ne $config_files{$file}{dst_mode} ){
+      return 1;
+   }
+
+   return undef;
+}
+
+sub copy_file {
+   ##
+   ## Logic used to do the actual file copy
+   ## and mtime uptdate
+   ##
+   ################################################
+   my $file = shift;
+
+   if ( $dry_run ){
+      print "WOULD COPY - $config_files{$file}{src} -> $file \n";
+      return;
+   } 
+
+   &handle_repository( $file, $repository );
+
+   print "copy $config_files{$file}{src} -> $file \n" if $verbose;
+   
+   ## need to handle directory creation if path does not exist
+   my ($parent_dir) = $file =~ /^(.*)\/(.*)$/;
+
+   if( $parent_dir =~ /^\// ){
+      unless( -d $parent_dir ){
+         print "Trying to make dir: $parent_dir\n" if $verbose;
+         mkpath( $parent_dir );
+      }
+   } 
+    
+   ##
+   ## Precmd
+   ##
+   my $precmd = $config_files{$file}{src} . $precommand_suffix;
+   if(-f $precmd){
+      print "------- PRECOMMAND : $precmd -------\n";
+      system($precmd);
+      print "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n";
+   } 
+
+   if( copy( $config_files{$file}{src}, $file) ){
+      ## force the mtimes to be equal (so we can trust mtime checks)
+      unless( $config_files{$file}{mtime} =~ /\d\d+/ ){
+         $config_files{$file}{mtime} = (stat $config_files{$file}{src})[9];
+      }
+      unless( utime( time, $config_files{$file}{mtime}, $file ) ){
+         print "Utime call on $file failed: $!";
+      }
+
+      ## ensure file permissions are the same
+      if( $config_files{$file}{mode} ne $config_files{$file}{dst_mode} ){
+         chmod $config_files{$file}{mode}, $file; 
+      }     
+
+      ## see if we've got a command to execute... and do it
+      my $cmd = $config_files{$file}{src} . $command_suffix;
+      if( -f $cmd ){
+         print "------ POSTCOMMAND : $cmd  ------\n" if $verbose;
+         system($cmd);
+         print "^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n" if $verbose;
+      }
+
+   }
+   else {
+      print "Couldn't copy $config_files{$file}{src} to $file: $!\n";
+   }
+}
+
+
+sub get_files {
+   ##
+   ##  routines to scan the config_tree and determine
+   ##  which files should should be setup on this host
+   ##
+   #####################################################
+   my $basedir = shift;
+  
+   unless( -d $basedir ){
+      unless ( $basedir =~ $ENV{HOSTNAME} ){
+         # skip the host specific warning message
+         print "$basedir does not exist\n" if $verbose;
+      }
+      return;
+   } 
+   
+   my $dirhandle = undef;
+
+   opendir(DIR, $basedir);
+   my @file_array = readdir( DIR );
+   closedir( DIR );
+   foreach my $file ( @file_array ){
+      next if ( $file eq "." or $file eq ".." or $file eq "CVS" );
+      next if ( $file =~ /$command_suffix_regex/ );  	# skip command files!
+      next if ( $file =~ /$precommand_suffix_regex/ );  # skip precommand files!
+      my $fullpath = "$basedir/$file";
+   
+      ## recurse directories
+      if( -d $fullpath ){
+         &get_files( $fullpath );
+      }   
+      else {
+         ##
+         ## Add this file into our list
+         ##
+ 
+         # strip the leading junk to determin the REAL file name
+
+         my ($real_file) = $fullpath =~ /$swap_global(.*)/;
+
+         $config_files{$real_file} = {
+		src => $fullpath,
+	 };
+      }
+   }
+}
+
+sub process_command_line {
+   
+   my %opts = ();
+   getopts('dvhC:R:', \%opts);
+
+   
+   if( $opts{C} ){
+      $host_class = $opts{C};
+   }
+   if ( $opts{v} ){
+      $verbose = 1;
+   }
+   if ( $opts{R} ){
+      $repository_base = $opts{R};
+   }      
+   if ( $opts{d} ){
+      $dry_run = 1;
+   }
+
+   if( $opts{h} ){
+      print "Usage:\n";
+      print "  -C class	= Class name to use\n";
+      print "  -h       = show this help\n";
+      print "  -v       = verbose\n";
+      print "  -R dir   = base repository dir\n";
+      print "  -d       = Dry run\n";
+      exit;
+   }
+
+}
+
+
+
+
+sub handle_repository {
+   my $file = shift;
+   my $repository = shift;
+
+
+   if( -f $file && $repository ){
+          
+      ## Make sure the repository dir exists
+      unless( -d $repository ){
+         print "Creating repository dir: $repository\n" if $verbose;
+         unless (  mkdir $repository ){
+            print "ERROR: Can't create reposiotry dir ( $repository ): $!";
+            return undef;
+         } 
+      }
+    
+ 
+      ## we need to back it up
+      my $backup_name = $file;
+      $backup_name =~ s/\//_/g;					# swap path indicators with _
+      my $backup_path = $repository . "/" . $backup_name;
+    
+
+      ##
+      ## if backup_path exists... start keeping  .1 .2 .3 ... extensions
+      ##
+
+      print "backup_path = $backup_path\n" if $verbose;
+
+      if( -f $backup_path ){
+          my $num = 1;
+
+          my $new_path = $backup_path . ".$num";
+
+	  while( -f $new_path ){
+             $num++;
+       	     $new_path = $backup_path . ".$num";
+          }   
+
+          $backup_path = $new_path;
+      }
+  
+      print "Backing up $file -> $backup_path\n" if $verbose;
+      #rename $file, $backup_path or warn "WARNING: error backing up $file to repository ($backup_path): $!";
+      `/bin/cp -a $file $backup_path`;
+
+   }
+
+   return 1;
+}
+
+

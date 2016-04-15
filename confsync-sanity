@@ -1,0 +1,193 @@
+#!/usr/bin/perl
+#
+# Written by Allen Bettilyon, allen@bettilyon.net 
+#
+# Copyright Allen Bettilyon 
+#
+# Confsync is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# Confsync is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# For a copy of the GNU General Public License, see http://www.gnu.org/licenses
+# or, write to the Free Software Foundation, Inc. 
+#
+#   59 Temple Place 
+#   Suite 330 
+#   Boston, MA 02111-1307  USA 
+#
+# Feel free to contact me with Any questions, comments, suggestions 
+# or concernces regarding confsync.  
+#
+#################################################
+
+use Sys::Syslog;
+
+##
+## Location of Confsync Command
+##
+my $confsync = "/usr/local/bin//confsync";
+
+##
+## Location of confsync master mount
+## 
+my $masetr_mount = "/mnt/confsync";
+
+##
+## Class defentions based on hostname regular expressions
+##
+my %class_config = (
+	## host class  => ## regex pattern
+	'classA'       => '^classA\d+', 
+        'classB'       => '^classB\d+',
+        'web'          => '^web\d+',
+        'mail'         => '^(mail|smtp)\d+',
+);
+
+
+##
+## Ensure we can execute confsync
+##	
+unless( -X $confsync ){
+   print "Can't execute $confsync";
+   exit(1);
+}
+
+
+##
+## determine  our hostname
+##
+my $hostname = $ENV{'HOSTNAME'} || $ENV{'HOST'} || `hostname`;
+chomp($hostname);
+
+##
+## If --for-real passed on the cmdline then do forreal,
+## otherwise, run confsync in non-dry run mode
+##
+my $for_real = undef;
+if ( $ARGV[0] =~ /for-real/ )
+{
+   print "DOING THIS FOR REAL!\n";
+   $for_real = 1;
+}
+
+&ensure_mount( $master_mount );
+
+
+##
+## Iterate the configuration hash
+##
+foreach my $class ( keys %class_config ){
+    my $regex = $class_config{$class};
+    if ( $hostname =~ /$regex/ ){
+        &run_confsync( $class );
+    }
+}
+
+
+##
+## since run_confsync exec()'s if your here, you 
+## gots no class that matched our regexes
+##
+
+
+&dolog("Confsync could not find matching class: host=$host");
+print STDERR "Sorry, no class matched for $host\n";
+exit;
+
+
+
+##
+## Run confsync with determined class
+##
+sub run_confsync {
+    my $class = shift;
+
+    if( $for_real )
+    {
+        &dolog("Running confsync for real with class=$class");
+        exec("$confsync -v -C $class");
+    }
+    else 
+    {
+	&dolog("Running confsync in dryrun with class=$class");
+        exec("$confsync -d -C $class");
+    }
+}
+
+
+##
+## Log function
+##
+sub dolog {
+    my $msg = shift;
+    
+    ## syslog
+    Sys::Syslog::openlog("confsync-sanity", "", "user");
+    Sys::Syslog::syslog("info", $msg);
+    Sys::Syslog::closelog();
+
+    ## local log
+    open(LOG,">>/var/log/confsync-sanity" );
+    print LOG time . " $msg\n";
+    close(LOG);
+}
+
+##
+## Ensure our master tree is mounted 
+##
+sub ensure_mount
+{
+    my $check_mount = shift;
+
+
+    open(MTAB,"/etc/mtab") or warn "Can't open mtab for reading: $!";
+
+    my $found_it = undef;
+    
+    while(<MTAB>)
+    {
+        my ($remote,$local,$type) = split;
+
+        if( $local eq $check_mount )
+        {
+            $found_it = 1;
+            last;
+        }
+    }
+    close(MTAB);
+
+    unless( $found_it )
+    {
+        print STDERR "ERROR: $check_mount does not appear to be mounted.  Attempting to mount...\n";
+
+        $mount_tries =+1;
+
+        #this is too much.. but why not?
+        if( $mount_tries < 3)
+        {
+            &mount_me($check_mount);
+        } 
+        else 
+        {
+            print STDERR "ERROR: attempt to mount $check_mount failed over 3 times.. bailing...\n";
+            exit(1);
+        }
+    }
+
+    return 1;
+}
+
+sub mount_me {
+    my $check_mount = shift;
+
+    `umount $check_mount`;
+    sleep 2;
+    `mount $check_mount`;
+    sleep 2;
+} 

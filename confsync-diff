@@ -1,0 +1,97 @@
+#!/usr/bin/perl
+#
+# Sat Mar 18 2007 rsteed
+########################
+
+
+use strict;
+
+
+my $diffCmd = '/usr/bin/diff';
+my $sanityCmd = '/var/cfengine/scripts/confsync-sanity';
+my @switches = ("-s");
+
+
+sub usage
+{
+   my $usageArg = shift;
+   if($usageArg eq 'help')
+   {
+      system("$diffCmd", '--help');
+      print "\n";
+   }
+   elsif($usageArg eq 'switch')
+   {
+      my $switch = shift;
+      print "$switch is not a valid switch.\n\n";
+   }
+   
+   print "Usage: confsync-diff <option(s)>\n";
+   print "       confsync-diff -E -B\n";
+   print "\n";
+   print "       Options:\n";
+   print "       Use standard diff options here, see man diff.\n";
+   print "       The \-s switch is always on.\n";
+   print "\n";
+   print "       --help Display this message and diff help.\n";
+   exit 1;
+}
+
+
+if( ! -e $sanityCmd)
+{
+   die "$sanityCmd does not exist $!";
+}
+
+
+if($#ARGV >= 0)
+{
+   if("@ARGV" =~ /--help/i)
+   {
+      &usage('help');
+   }
+  
+   my $switchArg = 0;
+   
+   foreach my $switch (@ARGV)
+   {
+      chomp($switch);
+      
+      if($switchArg == 1)
+      {
+         push(@switches, "$switch");
+         $switchArg = 0;
+      }
+      elsif($switch =~ /^-/)
+      {
+         if($switch =~ /^-(I|-ignore-matching-lines[^=]|c|C|-context[^=]|U|u|-unified[^=]|F|-show-function-line[^=]|W|-width[^=]|D|-ifdef[^=])/)
+         {
+            $switchArg = 1;
+         }
+         elsif($switch =~ /\w=/)
+         {
+            &usage('switch', "$switch");
+         }
+         
+         push(@switches, "$switch");
+		}
+		else
+      {
+      &usage('switch', "$switch");
+		}
+	}
+}
+
+
+my @confsync=qx($sanityCmd);
+
+foreach my $confsync (@confsync)
+{
+   my ($fileString1, $fileString2)=(split /\s/, $confsync)[3,5];
+   print "==============================================================================\n";
+   print "$fileString1 $fileString2\n";
+   print "==============================================================================\n";
+   system("$diffCmd @switches $fileString1 $fileString2");
+   print "______________________________________________________________________________\n";
+   print "\n\n";
+}
